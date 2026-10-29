@@ -2,16 +2,25 @@
   SMART IoT ENERGY MONITOR
   ESP32 + ZMPT101B + ACS712 20A + SSD1306 OLED + BUZZER
   Cloud: Blynk + ThingSpeak
-  MLX90640 thermal camera: NOT USED
+  MLX90640: NOT USED
 
-  Measures estimated RMS voltage/current, apparent power (VA),
-  and apparent energy (kVAh). Not true real power (W).
-  Calibrate both sensors before relying on readings.
+  Measurements:
+  - Estimated AC voltage and current RMS
+  - Apparent power (VA)
+  - Apparent energy (kVAh)
+  - Apparent power change rate (VA/s)
+  - High-current buzzer alarm
+
+  IMPORTANT:
+  Calibration constants are placeholders.
+  This does not measure true real power (W) or kWh.
 */
 
-#define BLYNK_TEMPLATE_ID   "TMPL3BFAlBC-G"
+#define BLYNK_TEMPLATE_ID   "YOUR_BLYNK_TEMPLATE_ID"
 #define BLYNK_TEMPLATE_NAME "Smart Energy Monitor"
-#define BLYNK_AUTH_TOKEN    "rnTk1rdVnp06L7AXv7-qDEGSOPg-1vsr"
+#define BLYNK_AUTH_TOKEN    "YOUR_BLYNK_AUTH_TOKEN"
+
+
 
 #include <WiFi.h>
 #include <BlynkSimpleEsp32.h>
@@ -22,21 +31,20 @@
 #include <math.h>
 
 // =============== WIFI SETTINGS ===============
-char ssid[] = "ACT-ai_102824320875";
-char pass[] = "41613770";
+char ssid[] = WIFI_SSID;
+char pass[] = WIFI_PASSWORD;
 
 // =============== THINGSPEAK SETTINGS ===============
-unsigned long THINGSPEAK_CHANNEL_ID = 3548012;
-const char *THINGSPEAK_WRITE_API_KEY =
-    "HZGCEG93ZXPW7W49";
+unsigned long THINGSPEAK_CHANNEL_ID = 12345;
+const char *tsWriteKey = THINGSPEAK_WRITE_API_KEY;
 
-// =============== SENSOR AND BUZZER PINS ===============
-const int VOLTAGE_PIN = 34;
-const int CURRENT_PIN = 35;
-const int BUZZER_PIN = 25;
+// =============== SENSOR PINS ===============
+const int VOLTAGE_PIN = 34;  // ZMPT101B OUT
+const int CURRENT_PIN = 35;  // ACS712 OUT
+const int BUZZER_PIN  = 25;  // Active buzzer signal
 
 // =============== CALIBRATION ===============
-// Starting placeholders; calibrate with a reference meter.
+// Starting placeholders. Calibrate using a trusted reference meter.
 float VOLTAGE_CAL_V_PER_ADC_V = 100.0;
 float CURRENT_CAL_A_PER_ADC_V = 20.0;
 
@@ -48,6 +56,8 @@ float CURRENT_CAL_A_PER_ADC_V = 20.0;
 Adafruit_SSD1306 display(
     SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
+bool oledAvailable = false;
+
 // =============== CLOUD CONNECTIONS ===============
 WiFiClient client;
 BlynkTimer timer;
@@ -55,6 +65,7 @@ BlynkTimer timer;
 // =============== MEASUREMENT SETTINGS ===============
 const int SAMPLE_COUNT = 1200;
 const int SAMPLE_DELAY_US = 200;
+
 const unsigned long MEASURE_INTERVAL_MS = 2000;
 const unsigned long CLOUD_INTERVAL_MS = 20000;
 
@@ -77,7 +88,8 @@ float readACRippleRMSVolts(int pin) {
   double sumSquares = 0.0;
 
   for (int i = 0; i < SAMPLE_COUNT; i++) {
-    float sampleV = analogReadMilliVolts(pin) / 1000.0f;
+    float sampleV =
+        analogReadMilliVolts(pin) / 1000.0f;
 
     sum += sampleV;
     sumSquares += (double)sampleV * sampleV;
@@ -86,6 +98,7 @@ float readACRippleRMSVolts(int pin) {
   }
 
   double mean = sum / SAMPLE_COUNT;
+
   double variance =
       (sumSquares / SAMPLE_COUNT) - (mean * mean);
 
@@ -107,6 +120,10 @@ void updateBuzzer() {
 
 // =============== OLED DISPLAY ===============
 void updateOLED() {
+  if (!oledAvailable) {
+    return;
+  }
+
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
@@ -120,10 +137,12 @@ void updateOLED() {
                  apparentEnergyKVAh);
 
   display.printf("WiFi: %s\n",
-      WiFi.status() == WL_CONNECTED ? "Connected" : "Offline");
+      WiFi.status() == WL_CONNECTED
+          ? "Connected" : "Offline");
 
   display.printf("Blynk: %s\n",
-      Blynk.connected() ? "Connected" : "Offline");
+      Blynk.connected()
+          ? "Connected" : "Offline");
 
   display.display();
 }
@@ -147,7 +166,7 @@ void updateBlynk() {
   }
 }
 
-// Blynk V6 slider sets the current alarm threshold.
+// Blynk V6 slider sets the current threshold.
 BLYNK_WRITE(V6) {
   currentThresholdA = param.asFloat();
 
@@ -155,7 +174,6 @@ BLYNK_WRITE(V6) {
       "Current threshold: %.2f A\n",
       currentThresholdA);
 
-  // Apply the new threshold immediately.
   updateBuzzer();
 }
 
@@ -173,12 +191,12 @@ void updateMeasurements() {
   currentRMS =
       currentADC * CURRENT_CAL_A_PER_ADC_V;
 
-  // Apparent power estimate, not real power.
+  // Apparent power estimate, not true real power.
   apparentPowerVA = voltageRMS * currentRMS;
 
   unsigned long now = millis();
 
-  // Integrate apparent energy in kVAh.
+  // Accumulate apparent energy in kVAh.
   if (previousEnergyMs != 0) {
     float elapsedHours =
         (now - previousEnergyMs) / 3600000.0f;
@@ -189,7 +207,7 @@ void updateMeasurements() {
 
   previousEnergyMs = now;
 
-  // Rate of change of apparent power in VA/s.
+  // Rate of change of apparent power, VA/s.
   if (previousPowerMs != 0) {
     float elapsedSeconds =
         (now - previousPowerMs) / 1000.0f;
@@ -204,21 +222,28 @@ void updateMeasurements() {
   previousPowerVA = apparentPowerVA;
   previousPowerMs = now;
 
-  // Trigger or clear the buzzer alarm.
+  // Activate buzzer if current exceeds threshold.
   updateBuzzer();
 
   Serial.println("------ ENERGY MONITOR ------");
+
   Serial.printf("Voltage: %.2f V\n", voltageRMS);
   Serial.printf("Current: %.3f A\n", currentRMS);
+
   Serial.printf("Apparent power: %.2f VA\n",
                 apparentPowerVA);
+
   Serial.printf("Apparent energy: %.6f kVAh\n",
                 apparentEnergyKVAh);
+
   Serial.printf("Power change: %.2f VA/s\n",
                 powerChangeRate);
 
+  Serial.printf("Current threshold: %.2f A\n",
+                currentThresholdA);
+
   if (currentRMS > currentThresholdA) {
-    Serial.println("WARNING: HIGH CURRENT - BUZZER ON");
+    Serial.println("ALARM: HIGH CURRENT - BUZZER ON");
   } else {
     Serial.println("Status: NORMAL - BUZZER OFF");
   }
@@ -242,7 +267,7 @@ void uploadThingSpeak() {
 
   int result = ThingSpeak.writeFields(
       THINGSPEAK_CHANNEL_ID,
-      THINGSPEAK_WRITE_API_KEY);
+      tsWriteKey);
 
   if (result == 200) {
     Serial.println("ThingSpeak upload successful");
@@ -258,7 +283,7 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
-  // Set buzzer output and keep it OFF at startup.
+  // Keep buzzer off at startup.
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
@@ -266,13 +291,15 @@ void setup() {
   analogSetPinAttenuation(VOLTAGE_PIN, ADC_11db);
   analogSetPinAttenuation(CURRENT_PIN, ADC_11db);
 
-  // OLED I2C: SDA = GPIO21, SCL = GPIO22.
+  // OLED: SDA GPIO21, SCL GPIO22.
   Wire.begin(21, 22);
   Wire.setClock(100000);
 
-  if (display.begin(
-          SSD1306_SWITCHCAPVCC,
-          OLED_ADDRESS)) {
+  oledAvailable = display.begin(
+      SSD1306_SWITCHCAPVCC,
+      OLED_ADDRESS);
+
+  if (oledAvailable) {
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
     display.setTextSize(1);
@@ -284,11 +311,12 @@ void setup() {
         "OLED not detected. Check wiring/address.");
   }
 
-  // Connect to Wi-Fi.
+  // Connect Wi-Fi.
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, pass);
 
-  Serial.print("Connecting to Wi-Fi");
+  Serial.print("Connecting to Wi-Fi...");
+
   unsigned long startTime = millis();
 
   while (WiFi.status() != WL_CONNECTED &&
@@ -307,10 +335,10 @@ void setup() {
     ThingSpeak.begin(client);
   } else {
     Serial.println(
-        "Wi-Fi connection failed. Check credentials.");
+        "Wi-Fi unavailable. Check local credentials.");
   }
 
-  // Configure and connect Blynk.
+  // Configure Blynk.
   Blynk.config(BLYNK_AUTH_TOKEN);
 
   if (WiFi.status() == WL_CONNECTED) {
